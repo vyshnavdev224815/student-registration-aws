@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Registration complete</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  </head>
+  <body>
+    <main class="page-shell compact-shell">
+      <section class="card result-card success-card">
+        <p class="result-icon" aria-hidden="true">✓</p>
+        <p class="eyebrow">Registration complete</p>
+        <h1>Welcome, {{ name }}.</h1>
+        <p>Your registration for <strong>{{ course }}</strong> has been saved successfully.</p>
+        <img class="photo-preview" src="{{ photo_url }}" alt="Your uploaded profile photo">
+        <p class="preview-note">Your photo preview is available for five minutes. The S3 bucket remains private.</p>
+        <a class="secondary-link" href="{{ url_for('home') }}">Register another student</a>
+      </section>
+    </main>
+  </body>
+</html>

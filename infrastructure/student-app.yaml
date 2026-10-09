@@ -1,0 +1,378 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Student registration demo - public Flask EC2 with private RDS MySQL and role-only access to private S3 photos.
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+  com.aws.cloudformation.Context:
+    arch: Public EC2 -> private Single-AZ RDS; EC2 -> private S3 via instance role
+    must:
+      - No NAT gateway or load balancer; keep the student lab within free-plan credits.
+      - Private subnets must never route to the internet gateway.
+Parameters:
+  Prefix:
+    Type: String
+    Default: vyshnav
+    AllowedPattern: '[a-z][a-z0-9-]{2,20}'
+  SshCidr:
+    Type: String
+    Description: Current public IPv4 address in CIDR /32 notation, for SSH only.
+    AllowedPattern: '(\d{1,3}\.){3}\d{1,3}/32'
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Key pair controlled by the student.
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+Resources:
+  StudentVpc:
+    Type: AWS::EC2::VPC
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Isolates this assignment from unrelated workloads in the account.
+        must:
+          - Keep subnet CIDRs aligned with the project guide.
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${Prefix}-student-app-vpc'
+        - Key: Project
+          Value: !Sub '${Prefix}-student-registration'
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref StudentVpc
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Sub '${AWS::Region}a'
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${Prefix}-public-subnet-1'
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: First private RDS subnet; no outbound internet route needed.
+        must:
+          - Do not associate with the public route table.
+    Properties:
+      VpcId: !Ref StudentVpc
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Sub '${AWS::Region}a'
+      Tags:
+        - Key: Name
+          Value: !Sub '${Prefix}-private-subnet-1'
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Second AZ is required for the RDS subnet group, even for Single-AZ compute.
+        must:
+          - Do not associate with the public route table.
+    Properties:
+      VpcId: !Ref StudentVpc
+      CidrBlock: 10.0.3.0/24
+      AvailabilityZone: !Sub '${AWS::Region}b'
+      Tags:
+        - Key: Name
+          Value: !Sub '${Prefix}-private-subnet-2'
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${Prefix}-student-igw'
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref StudentVpc
+      InternetGatewayId: !Ref InternetGateway
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref StudentVpc
+      Tags:
+        - Key: Name
+          Value: !Sub '${Prefix}-public-rt'
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+  PublicRouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Explicit local-only routing makes the private network boundary easy to audit.
+        must:
+          - Never add a default route to the internet gateway.
+    Properties:
+      VpcId: !Ref StudentVpc
+      Tags:
+        - Key: Name
+          Value: !Sub '${Prefix}-private-rt'
+  PrivateRouteAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable
+  PrivateRouteAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable
+  WebSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: HTTP is public by assignment; SSH is restricted to the student's current IP.
+        must:
+          - SSH must never be open to 0.0.0.0/0.
+    Properties:
+      GroupName: !Sub '${Prefix}-web-sg'
+      GroupDescription: Student registration EC2 ingress
+      VpcId: !Ref StudentVpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: Public student form
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref SshCidr
+          Description: Student IP only
+      Tags:
+        - Key: Name
+          Value: !Sub '${Prefix}-web-sg'
+  DbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Only the web instance's security group may initiate MySQL traffic.
+        must:
+          - Inbound 3306 source must remain the web security group, not a CIDR.
+      guard:
+        SuppressedRules:
+          - RESTRICTED_INCOMING_TRAFFIC
+    Properties:
+      GroupName: !Sub '${Prefix}-db-sg'
+      GroupDescription: Private student MySQL ingress
+      VpcId: !Ref StudentVpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref WebSecurityGroup
+          Description: Web instance only
+      Tags:
+        - Key: Name
+          Value: !Sub '${Prefix}-db-sg'
+  PhotoBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Private storage for uploaded photos and the deployment package; retained to avoid accidental data loss.
+        must:
+          - Never enable public listing or public object reads.
+      guard:
+        SuppressedRules:
+          - S3_BUCKET_LOGGING_ENABLED
+    Properties:
+      BucketName: !Sub '${Prefix}-student-photos-${AWS::AccountId}-${AWS::Region}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Project
+          Value: !Sub '${Prefix}-student-registration'
+  PhotoBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref PhotoBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt PhotoBucket.Arn
+              - !Sub '${PhotoBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+  DbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Two private AZs for student MySQL
+      DBSubnetGroupName: !Sub '${Prefix}-student-db-subnets'
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      Tags:
+        - Key: Project
+          Value: !Sub '${Prefix}-student-registration'
+  StudentDatabase:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: MySQL 8 Single-AZ micro instance fits the student lab; master secret is RDS-managed.
+        must:
+          - PubliclyAccessible remains false.
+          - Security group permits only the web security group.
+    Properties:
+      DBInstanceIdentifier: !Sub '${Prefix}-student-db'
+      Engine: mysql
+      EngineVersion: '8.4.11'
+      DBInstanceClass: db.t3.micro
+      AllocatedStorage: 20
+      StorageType: gp3
+      StorageEncrypted: true
+      MultiAZ: false
+      PubliclyAccessible: false
+      DBName: studentdb
+      MasterUsername: studentowner
+      ManageMasterUserPassword: true
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      VPCSecurityGroups:
+        - !Ref DbSecurityGroup
+      BackupRetentionPeriod: 1
+      DeletionProtection: false
+      Tags:
+        - Key: Project
+          Value: !Sub '${Prefix}-student-registration'
+        - Key: created_by
+          Value: rds-oss-skill
+        - Key: generation_model
+          Value: gpt-6.1-sol
+  Ec2Role:
+    Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Instance profile supplies temporary S3 and secret permissions; no IAM user keys.
+        must:
+          - Keep photo object actions scoped to this bucket and prefix.
+          - Keep secret access scoped to this database's managed secret.
+    Properties:
+      RoleName: !Sub '${Prefix}-ec2-s3-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+  StudentAppPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Customer-managed least-privilege permissions for the student app, as required by the assignment.
+        must:
+          - Restrict S3 actions to this bucket's deployment and photo prefixes.
+          - Restrict secret retrieval to this database's managed secret.
+    Properties:
+      ManagedPolicyName: !Sub '${Prefix}-student-app-access'
+      Roles:
+        - !Ref Ec2Role
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: PhotoObjects
+            Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:GetObject
+              - s3:DeleteObject
+            Resource: !Sub '${PhotoBucket.Arn}/student-photos/*'
+          - Sid: DeploymentArtifact
+            Effect: Allow
+            Action: s3:GetObject
+            Resource: !Sub '${PhotoBucket.Arn}/deployment/*'
+          - Sid: DatabaseSecret
+            Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource: !GetAtt StudentDatabase.MasterUserSecret.SecretArn
+  Ec2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref Ec2Role
+  WebInstance:
+    Type: AWS::EC2::Instance
+    DependsOn: PublicRoute
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Public micro instance runs Flask; SSM is available for maintenance without exposing more ports.
+        must:
+          - IAM instance profile stays attached; never use static AWS access keys.
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: t3.micro
+      KeyName: !Ref KeyName
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds:
+        - !Ref WebSecurityGroup
+      IamInstanceProfile: !Ref Ec2InstanceProfile
+      MetadataOptions:
+        HttpTokens: required
+        HttpEndpoint: enabled
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 8
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${Prefix}-student-web'
+        - Key: Project
+          Value: !Sub '${Prefix}-student-registration'
+Outputs:
+  VpcId:
+    Description: Project-specific VPC
+    Value: !Ref StudentVpc
+  WebSecurityGroupId:
+    Description: EC2 source security group for the database rule
+    Value: !Ref WebSecurityGroup
+  DatabaseEndpoint:
+    Description: Private RDS endpoint
+    Value: !GetAtt StudentDatabase.Endpoint.Address
+  DatabaseSecretArn:
+    Description: RDS-managed credential secret ARN
+    Value: !GetAtt StudentDatabase.MasterUserSecret.SecretArn
+  PhotoBucketName:
+    Description: Private photo and deployment bucket
+    Value: !Ref PhotoBucket
+  WebInstanceId:
+    Description: EC2 instance ID for Systems Manager
+    Value: !Ref WebInstance
+  ApplicationUrl:
+    Description: Public HTTP URL for the student form
+    Value: !Sub 'http://${WebInstance.PublicIp}/'

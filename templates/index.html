@@ -1,31 +1,55 @@
-<!DOCTYPE html>
-<html>
-<head>
-<title>Student Registration</title>
-</head>
-<body>
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Student Registration</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  </head>
+  <body>
+    <main class="page-shell">
+      <section class="intro" aria-labelledby="page-title">
+        <p class="eyebrow">Student Portal</p>
+        <h1 id="page-title">Start your learning journey</h1>
+        <p>Share your details to register for your selected course. Your information is stored securely.</p>
+      </section>
 
-<h1>Student Registration Form</h1>
+      <section class="card" aria-labelledby="form-title">
+        <div class="card-heading">
+          <h2 id="form-title">Registration form</h2>
+          <p>All fields are required.</p>
+        </div>
 
-<form action="/register"
-method="POST"
-enctype="multipart/form-data">
+        <form action="{{ url_for('register') }}" method="post" enctype="multipart/form-data">
+          <div class="field-grid">
+            <label for="name">Full name
+              <input id="name" name="name" type="text" autocomplete="name" maxlength="100" required autofocus>
+            </label>
+            <label for="email">Email address
+              <input id="email" name="email" type="email" autocomplete="email" maxlength="150" required>
+            </label>
+          </div>
 
-Name:
-<input type="text" name="name"><br><br>
+          <label for="course">Course
+            <select id="course" name="course" required>
+              <option value="" selected disabled>Select a course</option>
+              <option>Cloud Computing</option>
+              <option>Python Programming</option>
+              <option>Web Development</option>
+              <option>Data Analytics</option>
+            </select>
+          </label>
 
-Email:
-<input type="email" name="email"><br><br>
+          <label for="photo">Profile photo
+            <span class="file-picker">
+              <input id="photo" name="photo" type="file" accept="image/jpeg,image/png,image/webp" required>
+            </span>
+            <span class="hint">JPG, PNG, or WEBP. Maximum file size: 5 MB.</span>
+          </label>
 
-Course:
-<input type="text" name="course"><br><br>
-
-Photo:
-<input type="file" name="photo"><br><br>
-
-<input type="submit" value="Register">
-
-</form>
-
-</body>
+          <button type="submit">Complete registration <span aria-hidden="true">→</span></button>
+        </form>
+      </section>
+    </main>
+  </body>
 </html>

@@ -1,0 +1,21 @@
+[Unit]
+Description=Flask Student Registration App
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ec2-user
+Group=ec2-user
+WorkingDirectory=/opt/student-app
+EnvironmentFile=/etc/student-app.env
+ExecStartPre=/opt/student-app/.venv/bin/python /opt/student-app/bootstrap_db.py
+ExecStart=/opt/student-app/.venv/bin/gunicorn --workers 2 --bind 127.0.0.1:8000 app:app
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
